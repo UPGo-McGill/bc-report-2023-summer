@@ -13,6 +13,7 @@ CSD_rent <- qread("output/data/CSD_rent.qs")
 qload("data/model_chapter.qsm")
 model_iv_coef_dollar <- scales::dollar(model$coefficients[["iv"]], 0.01)
 rm(cmhc, cmhc_zones, model)
+cmhc <- qread("output/data/cmhc.qs")
 
 cmhc_zones <- qread("output/data/cmhc_zones.qs")
 
@@ -153,7 +154,7 @@ housing_loss_model <-
 # Create housing loss forecast
 housing_loss_forecast <-
   housing_loss_model |> 
-  forecast(h = "49 months") |> 
+  forecast(h = "55 months") |> 
   as_tibble() |> 
   select(tourism, month, units_trend_month = .mean)
 
@@ -165,7 +166,7 @@ housing_loss_monthly_series <-
 # Add decay to growth rate
 housing_loss_monthly_decay <-
   housing_loss_monthly_series |> 
-  mutate(decay = 0.98 ^ (as.numeric(month) - 602)) |> 
+  mutate(decay = 0.985 ^ (as.numeric(month) - 602)) |> 
   group_by(tourism) |> 
   mutate(
     lag = units_trend_month - 
@@ -252,7 +253,7 @@ fig_7 <-
   geom_line(aes(month, value, color = name), lwd = 0.5) +
   geom_label(aes(month, value, label = label, color = name), 
              fill = alpha("white", 0.75), size = 3) +
-  scale_x_yearmonth(name = NULL, limits = as.Date(c("2018-01-01", NA))) +
+  scale_x_yearmonth(name = NULL, limits = as.Date(c("2017-01-01", NA))) +
   scale_y_continuous(name = NULL, limits = c(0, NA), 
                      label = scales::comma) +
   scale_color_manual(name = NULL, 
@@ -514,7 +515,7 @@ fig_8 <-
   geom_line(aes(month, value, color = name), lwd = 0.5) +
   geom_label(aes(month, value, label = label, color = name), 
              fill = alpha("white", 0.75), size = 3) +
-  scale_x_yearmonth(name = NULL, limits = as.Date(c("2018-01-01", NA))) +
+  scale_x_yearmonth(name = NULL, limits = as.Date(c("2017-01-01", NA))) +
   scale_y_continuous(name = NULL, limits = c(0, NA), 
                      label = scales::comma) +
   scale_color_manual(name = NULL, 

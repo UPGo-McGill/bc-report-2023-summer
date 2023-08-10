@@ -5,6 +5,7 @@ source("R/01_startup.R")
 CSD <- qs::qread("output/data/CSD.qs", nthreads = future::availableCores())
 CD <- qs::qread("output/data/CD.qs", nthreads = future::availableCores())
 qload("data/model_chapter.qsm")
+cmhc <- qread("output/data/cmhc.qs")
 
 
 # Group CMHC zones by CD --------------------------------------------------
@@ -28,13 +29,14 @@ cmhc_zones <-
   left_join(select(st_drop_geometry(CD), CDUID, tourism), by = "CDUID") |> 
   relocate(geometry, .after = last_col())
 
-cmhc_conversion <- 
+cmhc_conversion <-
   cmhc |> 
   bind_rows() |> 
-  filter(data %in% c("rent", "units"), year %in% c(2016, 2021)) |> 
+  filter(data %in% c("rent", "units"), year %in% c(2016, 2021, 2022)) |> 
   select(data, neighbourhood, total, year) |> 
-  filter(neighbourhood != "James Bay" | total %in% c(1125, 1345, 2060, 1924)) |> 
-  pivot_wider(id_cols = c(neighbourhood, year), 
+  filter(neighbourhood != "James Bay" | total %in% c(1125, 1345, 151, 2060, 
+                                                     1924, 1831)) |> 
+  pivot_wider(id_cols = c(neighbourhood, year),
               names_from = data, values_from = total) |> 
   arrange(neighbourhood, year) |> 
   rename(cmhc_zone = neighbourhood) |> 
@@ -45,15 +47,17 @@ cmhc_conversion <-
               names_prefix = "rent_") |> 
   left_join(st_drop_geometry(CD), by = "CDUID") |> 
   select(CDUID, name, avg_rent_2016, rent_2016, avg_rent_2021, rent_2021,
-         dwellings_2016, dwellings_2021) |> 
+         dwellings_2016, dwellings_2021, rent_2022) |> 
   mutate(dif_2016 = rent_2016 / avg_rent_2016,
-         dif_2021 = rent_2021 / avg_rent_2021) |> 
+         dif_2021 = rent_2021 / avg_rent_2021,
+         dif_2022 = rent_2022 / rent_2021) |> 
   summarize(ratio_2016 = mean(dif_2016, na.rm = TRUE),
             ratio_2021 = mean(dif_2021, na.rm = TRUE),
             ratio_2016_w = sum(dif_2016 * dwellings_2016, na.rm = TRUE) / 
               sum(dwellings_2016, na.rm = TRUE),
             ratio_2021_w = sum(dif_2021 * dwellings_2021, na.rm = TRUE) / 
-              sum(dwellings_2021, na.rm = TRUE))
+              sum(dwellings_2021, na.rm = TRUE),
+            ratio_2022 = mean(dif_2022, na.rm = TRUE))
 
 CSD_rent <-
   CSD |> 
@@ -61,7 +65,8 @@ CSD_rent <-
             dwellings_2021, renter_pct_2016, renter_pct_2021, avg_rent_2016, 
             avg_rent_2021,
             cmhc_rent_2016 = avg_rent_2016 * cmhc_conversion$ratio_2016_w,
-            cmhc_rent_2021 = avg_rent_2021 * cmhc_conversion$ratio_2021_w)
+            cmhc_rent_2021 = avg_rent_2021 * cmhc_conversion$ratio_2021_w,
+            cmhc_rent_2022 = cmhc_rent_2021 * cmhc_conversion$ratio_2022)
 
 qsave(CSD_rent, "output/data/CSD_rent.qs")
 qsave(cmhc_zones, "output/data/cmhc_zones.qs")
