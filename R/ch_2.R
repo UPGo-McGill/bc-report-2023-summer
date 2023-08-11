@@ -11,9 +11,11 @@ CSD <- qread("output/data/CSD.qs")
 CSD_rent <- qread("output/data/CSD_rent.qs")
 
 qload("data/model_chapter.qsm")
+model_iv_coef <- model$coefficients[["iv"]]
 model_iv_coef_dollar <- scales::dollar(model$coefficients[["iv"]], 0.01)
 rm(cmhc, cmhc_zones, model)
 cmhc <- qread("output/data/cmhc.qs")
+cmhc_str <- qread("output/data/cmhc_str.qs")
 
 cmhc_zones <- qread("output/data/cmhc_zones.qs")
 
@@ -132,12 +134,12 @@ fig_6 <-
         plot.background = element_rect(fill = "white", colour = "transparent"),
         text = element_text(family = "Futura"))
 
-ggsave("output/figure_6.png", fig_6_2, width = 9, height = 5)
+ggsave("output/figure_6.png", fig_6, width = 9, height = 5)
 
 
 # Housing loss model ------------------------------------------------------
 
-# Get daily housing loss
+# Get monthly housing loss
 housing_loss_monthly_series <- 
   housing_loss |>  
   summarize(units = sum(`Housing units`, na.rm = TRUE), 
@@ -166,13 +168,15 @@ housing_loss_monthly_series <-
 # Add decay to growth rate
 housing_loss_monthly_decay <-
   housing_loss_monthly_series |> 
-  mutate(decay = 0.985 ^ (as.numeric(month) - 602)) |> 
+  mutate(decay = 0.97 ^ (as.numeric(month) - 602)) |> 
   group_by(tourism) |> 
   mutate(
-    lag = units_trend_month - 
-      units_trend_month[month == yearmonth("Mar 2020")],
+    lag = slide_dbl(units_trend_month, \(x) x[2] - x[1], .before = 1),
+    delta = lag * decay,
+    delta = if_else(month > yearmonth("Mar 2020"), delta, 0),
+    delta_cum = slide_dbl(delta, \(x) sum(x), .before = 100),
     units_trend_month = units_trend_month[month == yearmonth("Mar 2020")] + 
-      (lag * decay)) |> 
+      delta_cum) |> 
   ungroup()
 
 # Integrate forecast into monthly data
@@ -182,6 +186,25 @@ housing_loss_monthly_series <-
   mutate(units_trend = if_else(month >= yearmonth("2020-03-01"), 
                                units_trend, NA_real_))
 
+# Create housing loss forecast from post-Covid data
+housing_loss_forecast_2 <-
+  housing_loss |>  
+  summarize(units = sum(`Housing units`, na.rm = TRUE), 
+            .by = c(tourism, month)) |> 
+  tsibble::as_tsibble(key = tourism, index = month) |> 
+  filter(month >= yearmonth("2021-03"), month <= yearmonth("2023-06")) |> 
+  model(units = decomposition_model(
+    STL(units, robust = TRUE), RW(season_adjust ~ drift()))) |> 
+  forecast(h = "12 months") |> 
+  as_tibble() |> 
+  select(tourism, month, post_covid_trend = .mean)
+
+# Integrate forecast into monthly data
+housing_loss_monthly_series <- 
+  housing_loss_monthly_series |> 
+  full_join(housing_loss_forecast_2, by = c("tourism", "month"))
+
+# Apply seasonal smoothing to `units`
 housing_loss_monthly_seasonal <- 
   housing_loss_monthly_series |> 
   filter(!is.na(units)) |> 
@@ -190,7 +213,8 @@ housing_loss_monthly_seasonal <-
   components() |> 
   as_tibble() |> 
   select(tourism, month, units = season_adjust)
-  
+
+# Apply seasonal smoothing to `units_trend`
 housing_loss_monthly_seasonal <- 
   housing_loss_monthly_series |> 
   mutate(units = coalesce(units_trend, units)) |> 
@@ -201,8 +225,27 @@ housing_loss_monthly_seasonal <-
   select(tourism, month, units_trend = season_adjust) |> 
   mutate(units_trend = if_else(month < yearmonth("2020-03"), NA, 
                                units_trend)) |> 
-  full_join(housing_loss_monthly_seasonal, by = c("tourism", "month"))
+  full_join(housing_loss_monthly_seasonal, by = c("tourism", "month")) |> 
+  mutate(units_trend = if_else(month == yearmonth("2020-02"), units, 
+                               units_trend))
 
+# Apply seasonal smoothing to `post_covid_trend`
+housing_loss_monthly_seasonal <- 
+  housing_loss_monthly_series |> 
+  mutate(units = coalesce(post_covid_trend, units)) |> 
+  tsibble::as_tsibble(key = tourism, index = month) |> 
+  model(STL(units, robust = TRUE)) |> 
+  components() |> 
+  as_tibble() |> 
+  select(tourism, month, post_covid_trend = season_adjust) |> 
+  mutate(post_covid_trend = if_else(month < yearmonth("2023-07"), NA, 
+                               post_covid_trend)) |> 
+  full_join(housing_loss_monthly_seasonal, by = c("tourism", "month")) |> 
+  mutate(post_covid_trend = if_else(month == yearmonth("2023-06"), units, 
+                                    post_covid_trend))
+
+
+# Quick facts
 housing_loss_van_2023 <-
   housing_loss_monthly_seasonal |> 
   filter(tourism == "vancouver", month == yearmonth("2023 Jun")) |> 
@@ -236,6 +279,7 @@ fig_7 <-
   housing_loss_monthly_seasonal |> 
   as_tibble() |> 
   filter(month <= yearmonth("2023-06-30")) |> 
+  select(-post_covid_trend) |> 
   mutate_tourism() |> 
   pivot_longer(-c(tourism, month)) |> 
   filter(!is.na(value)) |> 
@@ -370,18 +414,9 @@ housing_loss_cmhc <-
   mutate(across(c(FREH, GH), \(x) coalesce(x, 0))) |> 
   transmute(cmhc, housing_loss = FREH + GH)
 
-cmhc_str_2022 <- 
-  cmhc_str |> 
-  filter(year == 5) |> 
-  left_join(housing_loss_cmhc, by = join_by(neighbourhood == cmhc)) |> 
-  mutate(year = 6,
-         iv = housing_loss / (dwellings * renter_pct) * 100 * 100) |> 
-  select(-housing_loss) |> 
-  bind_rows(cmhc_str)
-
 rent_change_table_raw_2022 <-
-  cmhc_str_2022 |> 
-  mutate(less_rent = iv * parse_number(model_iv_coef_dollar)) |> 
+  cmhc_str |> 
+  mutate(less_rent = iv * model_iv_coef) |> 
   left_join(select(st_drop_geometry(cmhc_zones), cmhc_zone, renters, tourism), 
             by = c("neighbourhood" = "cmhc_zone")) |> 
   select(neighbourhood, tier, tourism, year, total_rent, iv, less_rent, 
@@ -392,16 +427,12 @@ rent_change_table_raw_2022 <-
                                  .complete = TRUE),
          str_change = slide_dbl(less_rent, ~.x[2] - .x[1], .before = 1,
                                 .complete = TRUE), .by = neighbourhood) |> 
-  mutate(rent_change = if_else(year == 6, rent_change[year == 5], rent_change),
-         .by = neighbourhood) |> 
   mutate(str_incr = str_change / rent_change, .by = neighbourhood) |> 
   filter(year %in% 5:6)
 
 rent_change_table_raw_2022 <- 
   rent_change_table_raw_2022 |> 
   mutate(raw_rent = rent_change - str_change, .before = less_rent) |> 
-  mutate(rent_change = if_else(year == 6, raw_rent[year == 5] + str_change, 
-                               rent_change), .by = neighbourhood) |> 
   mutate(str_incr = str_change / rent_change)
 
 rent_change_table_2022 <-
@@ -441,15 +472,43 @@ str_rent_change_median_2022 <-
   pull(mean_str) |> 
   scales::dollar(1)
 
-str_rent_change_pct_2022 <- 
+str_rent_change_pct_2022 <-
   rent_change_table_raw_2022 |> 
   filter(year == 6, !is.na(str_change), !is.na(rent_change)) |> 
-  summarize(str_change = sum(str_change * renters) / 
+  summarize(pct_change = sum(str_change * renters) / 
               sum(rent_change * renters)) |> 
-  pull() |> 
+  pull(pct_change) |> 
   scales::percent(0.1)
 
+rent_2022 <- 
+  cmhc$rent |> 
+  filter(year == 2022) |> 
+  left_join(select(st_drop_geometry(cmhc_zones), cmhc_zone, renters), 
+            by = c("neighbourhood" = "cmhc_zone")) |> 
+  select(neighbourhood, renters, total) |> 
+  summarize(sum(total * renters * 12, na.rm = TRUE)) |>
+  pull()
 
+rent_2022_total <- 
+  rent_2022 |> scales::dollar(0.1, scale = 1/1000000000, suffix = " billion")
+
+rent_str_2022 <- 
+  cmhc_str |> 
+  filter(year + 2016 == 2022) |> 
+  mutate(less_rent = iv * model_iv_coef) |> 
+  left_join(select(st_drop_geometry(cmhc_zones), cmhc_zone, renters), 
+            by = c("neighbourhood" = "cmhc_zone")) |> 
+  filter(!is.na(tier)) |> 
+  select(neighbourhood, FREH, iv, less_rent, renters) |> 
+  summarize(sum(less_rent * renters * 12, na.rm = TRUE)) |> 
+  pull()
+
+rent_str_2022_total <- 
+  rent_str_2022 |> scales::dollar(1, scale = 1/1000000, suffix = " million")
+
+rent_str_pct_2022 <- (rent_str_2022 / rent_2022) |> scales::percent(0.1)
+
+  
 # Table 4 -----------------------------------------------------------------
 
 rent_change_table_2022 |> 
@@ -468,7 +527,7 @@ rent_change_table_2022 |>
               "Median YOY monthly rent chg. (2021)",
               "Median YOY impact of STR chg. on monthly rent chg. (2021)",
               "Total YOY impact of STR chg. on monthly rent chg. (2021)",
-              "Median YOY monthly rent chg. (2022 estimated)",
+              "Median YOY monthly rent chg. (2022)",
               "Median YOY impact of STR chg. on monthly rent chg. (2022)",
               "Total YOY impact of STR chg. on monthly rent chg. (2022)")) |> 
   gt::gt()
@@ -476,52 +535,99 @@ rent_change_table_2022 |>
 
 # Trend analysis: STR rent burden -----------------------------------------
 
-housing_loss_2023 <- 
+housing_loss_2024_trend <- 
   housing_loss_monthly_series |> 
   filter(month == max(month)) |> 
   pull(units_trend) |> 
   sum() |> 
   scales::comma(100)
 
-housing_loss_change_2022_2023 <-
+housing_loss_change_2023_2024 <-
   housing_loss_monthly_series |> 
-  filter(month == yearmonth("2022-12-31") | month == yearmonth("2023-12-31")) |> 
+  filter(month == yearmonth("2023-06") | month == max(month)) |> 
   as_tibble() |> 
-  summarize(dif = (sum(units_trend[year(month) == 2023], na.rm = TRUE) - 
-                     sum(units, na.rm = TRUE)) / sum(units, na.rm = TRUE)) |> 
-  pull(dif) |> 
+  summarize(sum = sum(units_trend[year(month) == 2024], na.rm = TRUE)) |> 
+  pull(sum) |> 
+  (\(x) (x - parse_number(housing_loss_2023)) / 
+     parse_number(housing_loss_2023))() |> 
   scales::percent(0.1)
+
+housing_loss_2024_post_covid_trend <- 
+  housing_loss_monthly_series |> 
+  filter(month == max(month)) |> 
+  pull(post_covid_trend) |> 
+  sum() |> 
+  scales::comma(100)
+
+housing_loss_change_2023_2024_post_covid <-
+  housing_loss_monthly_series |> 
+  filter(month == yearmonth("2023-06") | month == max(month)) |> 
+  as_tibble() |> 
+  summarize(sum = sum(post_covid_trend[year(month) == 2024], na.rm = TRUE)) |> 
+  pull(sum) |> 
+  (\(x) (x - parse_number(housing_loss_2023)) / 
+     parse_number(housing_loss_2023))() |> 
+  scales::percent(0.1)
+
+rent_inc_2024 <- 
+  (((parse_number(housing_loss_2024_post_covid_trend) - 
+       parse_number(housing_loss_2023)) * model_iv_coef) / (
+         rent_change_table_raw |> 
+           filter(year == 6, tier == "All") |> 
+           pull(renters) |> 
+           sum(na.rm = TRUE)) * 100)
+
+rent_inc_2024_annual <- rent_inc_2024 * 12
+
+rent_inc_2024_total <- ((parse_number(housing_loss_2024_post_covid_trend) - 
+    parse_number(housing_loss_2023)) * model_iv_coef * 12 * 100) |> 
+  scales::dollar(0.1, scale = 1 / 1000000, suffix = " million")
 
 
 # Figure 8 ----------------------------------------------------------------
 
-fig_8 <-
+fig_8_table <- 
   housing_loss_monthly_seasonal |> 
   as_tibble() |> 
   mutate_tourism() |> 
   pivot_longer(-c(tourism, month)) |> 
   filter(!is.na(value)) |> 
   mutate(label = case_when(
-    tourism == "Cariboo Chilcotin Coast" & month == yearmonth("2020-07-05") & 
-      name == "units" ~ "Actual housing loss", 
-    tourism == "Cariboo Chilcotin Coast" & month == yearmonth("2020-03-07") & 
-      name == "units_trend" ~ "Expected housing loss",
-    .default = NA_character_)) |> 
+    tourism == "Cariboo Chilcotin Coast" & month == yearmonth("2018-01-05") & 
+      name == "units" ~ "Actual\nhousing loss", 
+    tourism == "Cariboo Chilcotin Coast" & month == yearmonth("2020-09-07") & 
+      name == "units_trend" ~ "Expected\n(pre-Covid)",
+    tourism == "Cariboo Chilcotin Coast" & month == yearmonth("2023-07-07") & 
+      name == "post_covid_trend" ~ "Expected\n(post-Covid)",
+    .default = NA_character_))
+
+fig_8 <- 
+  fig_8_table |> 
   ggplot() +
   geom_ribbon(aes(x = month, ymin = units, ymax = units_trend, group = 1),
               data = mutate_tourism(filter(housing_loss_monthly_seasonal,
-                                           month <= yearmonth("2023-06-30"))), 
+                                           month <= yearmonth("2023-06-30"))),
               fill = col_palette[2], alpha = 0.3) +
+  geom_ribbon(aes(x = month, ymin = post_covid_trend, ymax = units_trend, 
+                  group = 1), 
+              data = mutate_tourism(filter(housing_loss_monthly_seasonal,
+                                           month >= yearmonth("2023-06-30"))),
+              fill = col_palette[3], alpha = 0.3) +
   geom_line(aes(month, value, color = name), lwd = 0.5) +
-  geom_label(aes(month, value, label = label, color = name), 
-             fill = alpha("white", 0.75), size = 3) +
+  ggrepel::geom_label_repel(aes(month, value, label = label, color = name), 
+             fill = alpha("white", 0.75), size = 3, 
+             nudge_y = case_when(
+               fig_8_table$name == "post_covid_trend" ~ -30,
+               fig_8_table$name == "units_trend" ~ 24,
+               .default = 10)) +
   scale_x_yearmonth(name = NULL, limits = as.Date(c("2017-01-01", NA))) +
   scale_y_continuous(name = NULL, limits = c(0, NA), 
                      label = scales::comma) +
   scale_color_manual(name = NULL, 
                      labels = c("Actual STR housing loss", 
-                                "Expected STR housing loss"), 
-                     values = col_palette[c(5, 6)]) +
+                                "Expected STR housing loss (pre-Covid)",
+                                "Expected STR housing loss (post-Covid)"), 
+                     values = col_palette[c(4, 5, 6)]) +
   facet_wrap(~tourism, scales = "free_y") +
   theme_minimal() +
   theme(legend.position = "none",
@@ -997,8 +1103,10 @@ tab_9 |>
   mutate(total_rent = if_else(is.na(str_rent_2022), NA_real_, total_rent)) |> 
   transmute(
     tourism_name,
-    loss_june_2022 = scales::comma(loss_june_2022, 1),
-    loss_june_2023 = scales::comma(loss_june_2023, 1),
+    loss_june_2022 = scales::comma(
+      loss_june_2022, if_else(loss_june_2022 > 20, 10, 1)),
+    loss_june_2023 = scales::comma(
+      loss_june_2023, if_else(loss_june_2023 > 20, 10, 1)),
     loss_change = scales::percent(loss_change, 0.1),
     loss_june_per_100 = scales::comma(loss_june_per_100, 0.1),
     str_rent_2022 = scales::dollar(str_rent_2022, 1),
@@ -1064,24 +1172,30 @@ tab_10 <-
 
 tab_10 |> 
   summarize(
-    tourism_name = "All",
     loss_june_2022 = sum(loss_june_2022),
     loss_june_2023 = sum(loss_june_2023),
     loss_change = (loss_june_2023 - loss_june_2022) / loss_june_2022,
-    dwellings = sum(dwellings),
     rentals = sum(rentals),
     loss_june_per_100 = loss_june_2023 / rentals * 100,
-    str_rent_2022 = (sum(loss_all_2022) - sum(loss_all_2021)) / 
-      (dwellings * rental_factor) * 100 * parse_number(model_iv_coef_dollar),
-    total_rent = sum(total_rent)) |> 
+    str_rent_2022 = (sum(loss_all_2022[tourism_name != "Whistler"]) - 
+                       sum(loss_all_2021[tourism_name != "Whistler"])) / 
+      (sum(dwellings[tourism_name != "Whistler"]) * rental_factor) * 100 * 
+      model_iv_coef,
+    total_rent = sum(total_rent[tourism_name != "Whistler"]),
+    dwellings = sum(dwellings),
+    tourism_name = "All") |>
+  relocate(tourism_name) |> 
+  relocate(dwellings, .after = loss_change) |> 
   bind_rows(select(tab_10, -loss_all_2021, -loss_all_2022)) |> 
   mutate(str_rent_2022 = if_else(loss_june_2022 < 10, NA_real_, 
                                  str_rent_2022)) |> 
   mutate(total_rent = if_else(is.na(str_rent_2022), NA_real_, total_rent)) |> 
   transmute(
     tourism_name,
-    loss_june_2022 = scales::comma(loss_june_2022, 1),
-    loss_june_2023 = scales::comma(loss_june_2023, 1),
+    loss_june_2022 = scales::comma(
+      loss_june_2022, if_else(loss_june_2022 > 20, 10, 1)),
+    loss_june_2023 = scales::comma(
+      loss_june_2023, if_else(loss_june_2023 > 20, 10, 1)),
     loss_change = scales::percent(loss_change, 0.1),
     loss_june_per_100 = scales::comma(loss_june_per_100, 0.1),
     str_rent_2022 = scales::dollar(str_rent_2022, 1),

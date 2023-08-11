@@ -36,7 +36,7 @@ handlers(global = TRUE)
 
 col_palette <-
   c("#B8D6BE", "#73AE80", "#B5C0DA", "#6C83B5", "#2A5A5B", "#B58A6C", "#5B362A",
-             "#AE7673")
+    "#AE7673")
              
 
 # Helper functions --------------------------------------------------------

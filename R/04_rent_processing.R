@@ -8,6 +8,17 @@ qload("data/model_chapter.qsm")
 cmhc <- qread("output/data/cmhc.qs")
 
 
+# Deal with duplicate entries in `cmhc` -----------------------------------
+
+cmhc <- 
+  cmhc |> 
+  map(\(x) {
+    x |> 
+      filter(neighbourhood != "James Bay" | total %in% c(
+        1125, 1174, 1331, 1295, 1347, 1345, 1515,
+        2060,  2162, 2176, 1877, 1896, 1924, 1831))})
+
+
 # Group CMHC zones by CD --------------------------------------------------
 
 cmhc_to_CD <- 
@@ -34,8 +45,6 @@ cmhc_conversion <-
   bind_rows() |> 
   filter(data %in% c("rent", "units"), year %in% c(2016, 2021, 2022)) |> 
   select(data, neighbourhood, total, year) |> 
-  filter(neighbourhood != "James Bay" | total %in% c(1125, 1345, 151, 2060, 
-                                                     1924, 1831)) |> 
   pivot_wider(id_cols = c(neighbourhood, year),
               names_from = data, values_from = total) |> 
   arrange(neighbourhood, year) |> 
@@ -68,6 +77,7 @@ CSD_rent <-
             cmhc_rent_2021 = avg_rent_2021 * cmhc_conversion$ratio_2021_w,
             cmhc_rent_2022 = cmhc_rent_2021 * cmhc_conversion$ratio_2022)
 
+qsave(cmhc, "output/data/cmhc.qs")
 qsave(CSD_rent, "output/data/CSD_rent.qs")
 qsave(cmhc_zones, "output/data/cmhc_zones.qs")
 
